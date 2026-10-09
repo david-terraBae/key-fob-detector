@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0c0e12" />
+title>Key Fob Detector</title>
+<style>
+  :root { --bg:#0c0e12; --line:#2a3140; --text:#f4efe6; --muted:#9aa3b2; --amber:#f0a202; --green:#3ddc97; --red:#ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  .app { max-width:520px; margin:0 auto; padding:16px 14px 40px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  p { color:var(--muted); font-size:13px; line-height:1.4; }
+  .banner { border:1px solid #6a2a2a; background:#2a1414; color:#ffd0d0; border-radius:12px; padding:10px 12px; font-size:13px; margin:10px 0; }
+  .ok { border-color:#245c45; background:#10241c; color:#d7ffe9; }
+  button { width:100%; border:0; border-radius:14px; padding:16px; font-weight:800; font-size:16px; background:linear-gradient(180deg,#ffd36a,var(--amber)); color:#1a1203; }
+  button.secondary { background:#1c2330; color:var(--text); border:1px solid var(--line); font-weight:600; margin-top:8px; }
+  .card { background:#141820; border:1px solid var(--line); border-radius:16px; padding:12px; margin-top:12px; }
+  .device { border:1px solid var(--line); border-radius:12px; padding:10px; margin-top:8px; background:#10141b; }
+  .name { font-weight:700; }
+  .meta { color:var(--muted); font-size:12px; margin-top:2px; }
+  .bar { height:8px; background:#242b38; border-radius:99px; margin-top:8px; overflow:hidden; }
+  .bar > span { display:block; height:100%; width:0; background:linear-gradient(90deg,#ff6b6b,#f0a202,#3ddc97); }
+  .big { font-size:40px; font-weight:800; margin:8px 0 0; }
+  .err { color:#ffb4b4; font-size:13px; min-height:1.2em; }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>Key Fob Detector</h1>
+  <p>Chrome on Android. The system Bluetooth list is the scan. Phones cannot hear 315/433 MHz remotes.</p>
+  <div id="banner" class="banner">Checking Bluetooth…</div>
+  <button id="scan" type="button">Scan Bluetooth</button>
+  <button id="again" class="secondary" type="button">Scan again</button>
+  <p class="err" id="err"></p>
+  <div class="card">
+    <div class="big" id="prox">—</div>
+    <p id="who">No fob selected yet.</p>
+    <div class="bar"><span id="meter"></span></div>
+    <p id="rssi">RSSI appears after you pick a device and it advertises.</p>
+  </div>
+  <div id="list"></div>
+</div>
+<script>
+const banner = document.getElementById("banner");
+const errEl = document.getElementById("err");
+const listEl = document.getElementById("list");
+const seen = new Map();
+let audioCtx = null;
+let lastBeep = 0;
+function fail(msg) {
+  errEl.textContent = msg;
+  banner.className = "banner";
+  banner.textContent = msg;
+}
+function ready(msg) {
+  banner.className = "banner ok";
+  banner.textContent = msg;
+}
+function pct(rssi) {
+  if (typeof rssi !== "number") return 0;
+  return Math.max(0, Math.min(100, Math.round(((rssi + 100) / 55) * 100)));
+}
+function word(rssi) {
+  if (typeof rssi !== "number") return "Waiting";
+  if (rssi >= -55) return "Right here";
+  if (rssi >= -68) return "Very close";
+  if (rssi >= -80) return "Nearby";
+  return "Faint";
+}
+function beep(close) {
+  const now = performance.now();
+  const gap = close ? 180 : 700;
+  if (now - lastBeep < gap) return;
+  lastBeep = now;
+  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.frequency.value = close ? 880 : 620;
+  g.gain.value = 0.05;
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(); o.stop(audioCtx.currentTime + 0.08);
+}
+function show(rec) {
+  document.getElementById("prox").textContent = word(rec.rssi);
+  document.getElementById("who").textContent = rec.name || "Unnamed device";
+  document.getElementById("meter").style.width = pct(rec.rssi) + "%";
+  document.getElementById("rssi").textContent = rec.rssi == null ? "No RSSI yet. Press a button on the fob." : (rec.rssi + " dBm");
+  if (typeof rec.rssi === "number") beep(rec.rssi > -68);
+  if (navigator.vibrate && rec.rssi > -60) navigator.vibrate(12);
+}
+function render() {
+  listEl.innerHTML = [...seen.values()].map(d =>
+    `<div class="device"><div class="name">${d.name || "Unnamed"}</div><div class="meta">${d.id}<br>${d.rssi == null ? "picked" : d.rssi + " dBm"}</div></div>`
+  ).join("");
+}
+function onAdv(event) {
+  const id = event.device.id;
+  const rec = seen.get(id) || { id, name: event.device.name || "Unnamed", device: event.device };
+  rec.rssi = event.rssi;
+  rec.name = event.device.name || rec.name;
+  seen.set(id, rec);
+  show(rec);
+  render();
+}
+async function scan() {
+  errEl.textContent = "";
+  if (!window.isSecureContext) {
+    fail("Bluetooth is blocked on this page. Open it in Chrome from an https link, not a downloaded file.");
+    return;
+  }
+  if (!navigator.bluetooth) {
+    fail("This browser has no Web Bluetooth. Open in Chrome, not an in-app browser.");
+    return;
+  }
+  try {
+    const device = await navigator.bluetooth.requestDevice({
+      acceptAllDevices: true,
+      optionalServices: ["battery_service", "device_information"]
+    });
+    const rec = { id: device.id, name: device.name || "Unnamed device", device, rssi: null };
+    seen.set(device.id, rec);
+    render();
+    show(rec);
+    ready("Tracking " + rec.name + ". Press the fob button if the signal stays empty.");
+    device.addEventListener("advertisementreceived", onAdv);
+    if (device.watchAdvertisements) {
+      await device.watchAdvertisements();
+    } else {
+      fail("This Chrome cannot watch signal strength. The device was found, but RSSI needs a newer Chrome.");
+    }
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    if (/cancel/i.test(msg)) fail("Scan cancelled. The popup list is the scan — pick a device in it.");
+    else fail(msg);
+  }
+}
+document.getElementById("scan").onclick = scan;
+document.getElementById("again").onclick = scan;
+if (!window.isSecureContext) fail("Open this in Chrome via HTTPS. A file download cannot scan.");
+else if (!navigator.bluetooth) fail("Open in Chrome on Android. Safari and Firefox cannot scan.");
+else ready("Tap Scan. Chrome will list nearby Bluetooth devices. That list is the scan.");
+</script>
+</body>
+</html>
